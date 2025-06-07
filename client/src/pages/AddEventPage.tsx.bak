@@ -1,0 +1,652 @@
+import { useState, useRef, useEffect } from 'react';
+import { useLocation } from 'wouter';
+import { z } from 'zod';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { ArrowRight, Calendar, Clock, Trash2, Edit2, Pencil, RefreshCw, Moon, Sun, ChevronLeft, ChevronRight, ChevronDown } from 'lucide-react';
+import { useCategories } from '@/context/CategoryContext';
+import { apiRequest } from '@/lib/queryClient';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Checkbox } from '@/components/ui/checkbox';
+import { useToast } from '@/hooks/use-toast';
+import { Switch } from '@/components/ui/switch';
+import { Dialog, DialogContent, DialogTrigger, DialogTitle } from '@/components/ui/dialog';
+
+// Map of Hijri month lengths based on Umm Al-Qura calendar
+const hijriMonthLengths = {
+  1: 30, // Muharram
+  2: 29, // Safar
+  3: 30, // Rabi' al-awwal
+  4: 29, // Rabi' al-thani
+  5: 30, // Jumada al-awwal
+  6: 29, // Jumada al-thani
+  7: 30, // Rajab
+  8: 29, // Sha'ban
+  9: 30, // Ramadan
+  10: 29, // Shawwal
+  11: 30, // Dhu al-Qi'dah
+  12: 29  // Dhu al-Hijjah
+};
+
+// Define event form schema with dynamic validation
+const eventSchema = z.object({
+  title: z.string().min(2, 'العنوان يجب أن يكون على الأقل حرفين'),
+  category: z.string(),
+  date: z.object({
+    hijriMonth: z.number().min(1, 'الشهر يجب أن يكون من 1 إلى 12').max(12, 'الشهر يجب أن يكون من 1 إلى 12'),
+    hijriYear: z.number().min(1400, 'السنة يجب أن تكون بين 1400 و 1500').max(1500, 'السنة يجب أن تكون بين 1400 و 1500'),
+    hijriDay: z.number()
+      .min(1, 'اليوم يجب أن يكون إيجابيًا')
+      .max(30, 'اليوم لا يمكن أن يتجاوز 30 في التقويم الهجري')
+      .superRefine((day, ctx) => {
+        let month = 1;
+        
+        // Try to get the month from the parent object
+        try {
+          const parent = ctx.parent as Record<string, number>;
+          if (parent && typeof parent.hijriMonth === 'number') {
+            month = parent.hijriMonth;
+          }
+        } catch (e) {
+          // If there's an error, use default month 1
+          month = 1;
+        }
+        
+        // Make sure month is a valid key
+        if (month < 1 || month > 12) {
+          month = 1;
+        }
+        
+        const maxDaysInMonth = hijriMonthLengths[month as keyof typeof hijriMonthLengths] || 30;
+        
+        if (day > maxDaysInMonth) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `شهر ${getHijriMonthName(month)} لا يمكن أن يكون فيه أكثر من ${maxDaysInMonth} يوم`,
+          });
+        }
+      }),
+  }),
+  days: z.number().min(1, 'عدد الأيام يجب أن يكون على الأقل 1').max(365, 'عدد الأيام لا يمكن أن يتجاوز 365'),
+  time: z.string().regex(/^\d{2}:\d{2}$/, 'الوقت يجب أن يكون بتنسيق ساعة:دقيقة'),
+  deleteAfterEnd: z.boolean().default(false),
+  notes: z.string().optional(),
+});
+
+// Helper function to get Hijri month name
+function getHijriMonthName(month: number): string {
+  const hijriMonthNames = [
+    'محرم', 'صفر', 'ربيع الأول', 'ربيع الثاني',
+    'جمادى الأولى', 'جمادى الآخرة', 'رجب', 'شعبان',
+    'رمضان', 'شوال', 'ذو القعدة', 'ذو الحجة'
+  ];
+  
+  return hijriMonthNames[month - 1] || '';
+}
+
+// تقريب لتحويل من التاريخ الهجري إلى الميلادي (أكثر دقة)
+function hijriToGregorianYear(hijriYear: number): number {
+  // جدول تحويل ثابت للسنوات الحديثة للحصول على دقة أكثر
+  const conversionTable: Record<number, number> = {
+    1444: 2023,
+    1445: 2024,
+    1446: 2025,
+    1447: 2026,
+    1448: 2027,
+    1449: 2028,
+    1450: 2029,
+    1451: 2030
+  };
+  
+  // إذا كانت السنة موجودة في الجدول، نستخدم القيمة من الجدول
+  if (conversionTable[hijriYear]) {
+    return conversionTable[hijriYear];
+  }
+  
+  // وإلا نستخدم تقريبًا عامًا
+  return hijriYear + 579;
+}
+
+export default function AddEventPage() {
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isHijri, setIsHijri] = useState(true);
+  const [isDateDialogOpen, setIsDateDialogOpen] = useState(false);
+  const [selectedMonth, setSelectedMonth] = useState<number>(new Date().getMonth() + 1);
+  const [selectedYear, setSelectedYear] = useState<number>(2025);
+  const { toast } = useToast();
+  const [, navigate] = useLocation();
+  const { categories } = useCategories();
+
+  // Find default category
+  const defaultCategory = categories.find(c => c.default)?.id || '';
+  
+  // Create form and set default values
+  const form = useForm<z.infer<typeof eventSchema>>({
+    resolver: zodResolver(eventSchema),
+    defaultValues: {
+      title: '',
+      category: defaultCategory,
+      date: {
+        hijriDay: new Date().getDate(),
+        hijriMonth: new Date().getMonth() + 1,
+        hijriYear: 1446,
+      },
+      days: 1,
+      time: '12:00',
+      deleteAfterEnd: false,
+      notes: '',
+    },
+  });
+  
+  const queryClient = useQueryClient();
+  
+  // تحديث القيم عند فتح نافذة اختيار التاريخ
+  useEffect(() => {
+    if (isDateDialogOpen) {
+      setSelectedMonth(form.getValues().date.hijriMonth);
+      setSelectedYear(form.getValues().date.hijriYear);
+    }
+  }, [isDateDialogOpen, form]);
+  
+  // Create mutation for adding a new event
+  const addEventMutation = useMutation({
+    mutationFn: async (values: z.infer<typeof eventSchema>) => {
+      const response = await apiRequest('POST', '/api/events', values);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'فشل في إضافة المناسبة');
+      }
+      return await response.json();
+    },
+    onSuccess: () => {
+      toast({
+        title: 'تمت إضافة المناسبة بنجاح',
+        description: 'تمت إضافة المناسبة إلى التقويم الخاص بك',
+      });
+      queryClient.invalidateQueries({ queryKey: ['/api/events'] });
+      navigate('/events');
+    },
+    onError: (error: Error) => {
+      toast({
+        title: 'خطأ في إضافة المناسبة',
+        description: error.message,
+        variant: 'destructive',
+      });
+      setIsSubmitting(false);
+    },
+  });
+
+  // Handle form submission
+  const onSubmit = async (values: z.infer<typeof eventSchema>) => {
+    setIsSubmitting(true);
+    
+    // إضافة حقول التاريخ الميلادي قبل إرسال البيانات
+    const gregorianYear = hijriToGregorianYear(values.date.hijriYear);
+    const gregorianMonth = values.date.hijriMonth % 12 || 12; // تحويل بسيط للشهر
+    const gregorianDay = Math.min(values.date.hijriDay, 28); // ضمان أن اليوم لا يتجاوز عدد أيام الشهر الميلادي
+    
+    const formDataWithGregorianDate = {
+      ...values,
+      date: {
+        ...values.date,
+        gregorianDay,
+        gregorianMonth,
+        gregorianYear
+      }
+    };
+    
+    addEventMutation.mutate(formDataWithGregorianDate);
+  };
+
+  return (
+    <div className="container mx-auto py-4 md:py-8 px-4">
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-bold">إضافة مناسبة جديدة</h1>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => navigate('/events')}
+        >
+          <ArrowRight className="h-5 w-5" />
+        </Button>
+      </div>
+      
+      <Card className="border-blue-200 shadow-md">
+        <CardHeader className="bg-blue-600 text-white">
+          <CardTitle className="text-xl">معلومات المناسبة</CardTitle>
+          <CardDescription className="text-blue-100">
+            أدخل تفاصيل المناسبة التي تريد إضافتها إلى التقويم
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="pt-6">
+          <Form {...form}>
+            <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+              <div className="space-y-4">
+                <FormField
+                  control={form.control}
+                  name="title"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel className="text-lg font-medium mr-2 mb-2 flex items-center gap-2">
+                        <Pencil className="h-5 w-5 text-blue-600" />
+                        العنوان
+                      </FormLabel>
+                      <FormControl>
+                        <Input 
+                          placeholder="عنوان المناسبة" 
+                          className="text-right text-lg border-2 border-gray-200"
+                          {...field} 
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                
+                <FormField
+                  control={form.control}
+                  name="category"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel className="text-lg font-medium mr-2 mb-2 flex items-center gap-2">
+                        <Edit2 className="h-5 w-5 text-blue-600" />
+                        الفئة
+                      </FormLabel>
+                      <Select
+                        value={field.value}
+                        onValueChange={field.onChange}
+                      >
+                        <FormControl>
+                          <SelectTrigger className="text-right text-lg border-2 border-gray-200">
+                            <SelectValue placeholder="اختر الفئة" />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          {categories.map((category) => (
+                            <SelectItem 
+                              key={category.id} 
+                              value={category.id}
+                            >
+                              <span className="flex items-center gap-2">
+                                <span 
+                                  className="inline-block w-3 h-3 rounded-full" 
+                                  style={{ backgroundColor: category.color }}
+                                ></span>
+                                {category.name} 
+                                {category.default && <span className="text-xs text-gray-500">(الافتراضي)</span>}
+                              </span>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                
+                <FormField
+                  control={form.control}
+                  name="date"
+                  render={({ field }) => (
+                    <FormItem>
+                      <div className="flex justify-between items-center mb-2">
+                        <FormLabel className="text-lg font-medium flex items-center gap-2">
+                          <Calendar className="h-5 w-5 text-blue-600" />
+                          التاريخ
+                        </FormLabel>
+                        <Button 
+                          type="button"
+                          variant="outline" 
+                          size="sm"
+                          onClick={() => setIsHijri(!isHijri)} 
+                          className="bg-white hover:bg-gray-100 text-blue-600 flex items-center gap-2"
+                        >
+                          <RefreshCw className="h-4 w-4" />
+                          {isHijri ? 'ميلادي' : 'هجري'}
+                        </Button>
+                      </div>
+                      <div 
+                        className="flex items-center justify-between border-2 border-gray-200 rounded-md p-3 cursor-pointer"
+                        onClick={() => setIsDateDialogOpen(true)}
+                      >
+                        <div className="text-lg">
+                          {isHijri ? (
+                            <span>
+                              {form.getValues().date.hijriDay} {getHijriMonthName(form.getValues().date.hijriMonth)} {form.getValues().date.hijriYear}
+                            </span>
+                          ) : (
+                            <span>
+                              {form.getValues().date.hijriDay}{' '}
+                              {new Date(2025, form.getValues().date.hijriMonth-1, 1).toLocaleDateString('ar', { month: 'long' })}{' '}
+                              {form.getValues().date.hijriYear && hijriToGregorianYear(form.getValues().date.hijriYear)}
+                            </span>
+                          )}
+                        </div>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                        >
+                          <Calendar className="h-5 w-5 text-blue-600" />
+                        </Button>
+                      </div>
+
+                          {/* This Dialog window replaced with custom calendar picker */}
+                          <Dialog
+                            open={isDateDialogOpen}
+                            onOpenChange={setIsDateDialogOpen}
+                          >
+                            <DialogContent className="p-0 sm:max-w-[425px]" dir="rtl">
+                              <DialogTitle className="sr-only">اختيار التاريخ</DialogTitle>
+                              <div className="bg-emerald-700 text-white p-4">
+                                <div className="flex items-center justify-between">
+                                  <Pencil className="h-6 w-6" />
+                                  <h2 className="text-xl font-bold text-center">
+                                    اختيار التاريخ
+                                  </h2>
+                                </div>
+                              </div>
+                              
+                              <div className="bg-emerald-700 text-white p-2 flex justify-center">
+                                <Button 
+                                  variant="outline" 
+                                  size="sm" 
+                                  onClick={() => setIsHijri(!isHijri)} 
+                                  className="bg-white hover:bg-gray-100 text-emerald-700 flex items-center gap-2"
+                                >
+                                  <RefreshCw className="h-4 w-4" />
+                                  {isHijri ? 'تبديل للتقويم الميلادي' : 'تبديل للتقويم الهجري'}
+                                </Button>
+                              </div>
+                              
+                              <div className="p-6 space-y-4">
+                                {/* قسم اختيار اليوم */}
+                                <div className="space-y-2">
+                                  <label className="block text-sm font-medium mb-1">
+                                    {isHijri ? 'اليوم (هجري)' : 'اليوم (ميلادي)'}
+                                  </label>
+                                  <select
+                                    className="w-full p-2 border rounded-md"
+                                    value={form.getValues().date.hijriDay}
+                                    onChange={(e) => {
+                                      const dayValue = parseInt(e.target.value);
+                                      form.setValue('date.hijriDay', dayValue);
+                                      form.trigger('date.hijriDay');
+                                    }}
+                                  >
+                                    {Array.from(
+                                      { length: isHijri 
+                                          ? (hijriMonthLengths[form.getValues().date.hijriMonth as keyof typeof hijriMonthLengths] || 30) 
+                                          : 31 
+                                      }, 
+                                      (_, i) => i + 1
+                                    ).map((day) => (
+                                      <option key={`day-option-${day}`} value={day}>
+                                        {day}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+
+                                {/* قسم اختيار الشهر */}
+                                <div className="space-y-2">
+                                  <label className="block text-sm font-medium mb-1">
+                                    {isHijri ? 'الشهر (هجري)' : 'الشهر (ميلادي)'}
+                                  </label>
+                                  <select
+                                    className="w-full p-2 border rounded-md"
+                                    value={form.getValues().date.hijriMonth}
+                                    onChange={(e) => {
+                                      const monthValue = parseInt(e.target.value);
+                                      setSelectedMonth(monthValue);
+                                      form.setValue('date.hijriMonth', monthValue);
+                                      form.trigger('date.hijriMonth');
+                                      
+                                      // التحقق من اليوم عند تغيير الشهر
+                                      const maxDaysInMonth = hijriMonthLengths[monthValue as keyof typeof hijriMonthLengths] || 30;
+                                      if (form.getValues().date.hijriDay > maxDaysInMonth) {
+                                        form.setValue('date.hijriDay', maxDaysInMonth);
+                                        form.trigger('date.hijriDay');
+                                      }
+                                    }}
+                                  >
+                                    {Array.from({ length: 12 }, (_, i) => i + 1).map((month) => (
+                                      <option key={`month-${month}`} value={month}>
+                                        {isHijri ? getHijriMonthName(month) : new Date(2025, month-1, 1).toLocaleDateString('ar', { month: 'long' })}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </div>
+                                
+                                {/* قسم اختيار السنة */}
+                                <div className="space-y-2">
+                                  <label className="block text-sm font-medium mb-1">
+                                    {isHijri ? 'السنة (هجري)' : 'السنة (ميلادي)'}
+                                  </label>
+                                  <select
+                                    className="w-full p-2 border rounded-md"
+                                    value={form.getValues().date.hijriYear}
+                                    onChange={(e) => {
+                                      const yearValue = parseInt(e.target.value);
+                                      setSelectedYear(yearValue);
+                                      form.setValue('date.hijriYear', yearValue);
+                                      form.trigger('date.hijriYear');
+                                    }}
+                                  >
+                                    {/* إظهار السنة الحالية وخمس سنوات قادمة فقط */}
+                                    {(() => {
+                                      // نستخدم السنة الحالية كنقطة بداية
+                                      const startYear = isHijri ? 1446 : 2025;
+                                      const years = [];
+                                      
+                                      // إنشاء مصفوفة من 6 سنوات (السنة الحالية و5 سنوات قادمة)
+                                      for (let i = 0; i < 6; i++) {
+                                        const yearValue = startYear + i;
+                                        years.push(
+                                          <option key={`year-${yearValue}`} value={isHijri ? yearValue : (yearValue - 2025 + 1446)}>
+                                            {yearValue}
+                                          </option>
+                                        );
+                                      }
+                                      
+                                      return years;
+                                    })()}
+                                  </select>
+                                </div>
+                              </div>
+                              
+                              <div className="p-4 border-t flex justify-between">
+                                <Button 
+                                  type="button" 
+                                  variant="ghost"
+                                  className="text-red-500"
+                                  onClick={() => {
+                                    setIsDateDialogOpen(false);
+                                  }}
+                                >
+                                  الإلغاء
+                                </Button>
+                                <Button 
+                                  type="button" 
+                                  variant="ghost"
+                                  className="text-emerald-700"
+                                  onClick={() => setIsDateDialogOpen(false)}
+                                >
+                                  حسنًا
+                                </Button>
+                              </div>
+                            </DialogContent>
+                          </Dialog>
+
+                          {/* تم إزالة نافذة اختيار الوقت */}
+                        </div>
+                      </div>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                
+                <FormField
+                  control={form.control}
+                  name="days"
+                  render={({ field }) => (
+                    <FormItem>
+                      <div className="rounded-md border overflow-hidden">
+                        <div className="bg-blue-600 p-3 flex items-center gap-2 text-white">
+                          <RefreshCw className="h-6 w-6" />
+                          <h3 className="text-lg font-medium">عدد الأيام</h3>
+                        </div>
+                        <div className="p-4">
+                          <div className="flex items-center gap-4">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="icon"
+                              onClick={() => {
+                                const currentDays = Number(field.value);
+                                if (currentDays > 1) {
+                                  field.onChange(currentDays - 1);
+                                }
+                              }}
+                            >
+                              -
+                            </Button>
+                            <FormControl>
+                              <Input 
+                                type="number" 
+                                min="1"
+                                max="365"
+                                className="text-center text-lg"
+                                {...field} 
+                                onChange={(e) => {
+                                  const value = parseInt(e.target.value);
+                                  if (!isNaN(value) && value >= 1 && value <= 365) {
+                                    field.onChange(value);
+                                  }
+                                }}
+                              />
+                            </FormControl>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="icon"
+                              onClick={() => {
+                                const currentDays = Number(field.value);
+                                if (currentDays < 365) {
+                                  field.onChange(currentDays + 1);
+                                }
+                              }}
+                            >
+                              +
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                
+                <FormField
+                  control={form.control}
+                  name="time"
+                  render={({ field }) => (
+                    <FormItem>
+                      <div className="rounded-md border overflow-hidden">
+                        <div className="bg-blue-600 p-3 flex items-center gap-2 text-white">
+                          <Clock className="h-6 w-6" />
+                          <h3 className="text-lg font-medium">الوقت</h3>
+                        </div>
+                        <div className="p-4">
+                          <FormControl className="flex-grow">
+                            <Input 
+                              type="time" 
+                              {...field} 
+                              className="text-right text-lg h-12 border rounded-md focus:border-blue-200" 
+                            />
+                          </FormControl>
+                        </div>
+                      </div>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </div>
+              
+              <FormField
+                control={form.control}
+                name="deleteAfterEnd"
+                render={({ field }) => (
+                  <FormItem className="flex flex-row items-start space-x-3 space-x-reverse space-y-0 rounded-md border p-4">
+                    <FormControl>
+                      <Checkbox
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                      />
+                    </FormControl>
+                    <div className="space-y-1 leading-none">
+                      <FormLabel className="flex items-center gap-2">
+                        <Trash2 className="h-4 w-4 text-red-500" />
+                        حذف تلقائي بعد انتهاء المناسبة
+                      </FormLabel>
+                      <p className="text-sm text-muted-foreground">
+                        سيتم حذف المناسبة تلقائيًا بعد تاريخ انتهائها
+                      </p>
+                    </div>
+                  </FormItem>
+                )}
+              />
+              
+              <FormField
+                control={form.control}
+                name="notes"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel className="text-lg font-medium">ملاحظات إضافية (اختياري)</FormLabel>
+                    <FormControl>
+                      <textarea 
+                        {...field} 
+                        placeholder="أدخل أي ملاحظات إضافية هنا..." 
+                        className="flex h-32 w-full rounded-md border border-input bg-background px-3 py-2 text-lg text-right shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              
+              <div className="flex justify-end gap-4 pt-4">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => navigate('/events')}
+                >
+                  إلغاء
+                </Button>
+                <Button
+                  type="submit"
+                  className="bg-blue-600 hover:bg-blue-700 px-6"
+                  disabled={isSubmitting}
+                >
+                  {isSubmitting ? (
+                    <span className="flex items-center gap-2">
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      جاري الإضافة...
+                    </span>
+                  ) : (
+                    'إضافة المناسبة'
+                  )}
+                </Button>
+              </div>
+            </form>
+          </Form>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
