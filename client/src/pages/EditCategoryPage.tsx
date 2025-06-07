@@ -65,7 +65,7 @@ export default function EditCategoryPage() {
     const fetchCategory = async () => {
       try {
         const res = await fetch(
-          `https://cleander-project-server.onrender.com/api/categories/${categoryId}`,
+          `https://cleander-project-server-vmm5.onrender.com/api/categories/${categoryId}`,
           {
             credentials: 'include',
           }
@@ -98,7 +98,7 @@ export default function EditCategoryPage() {
     setIsSubmitting(true);
     try {
       const res = await fetch(
-        `https://cleander-project-server.onrender.com/api/categories/${categoryId}`,
+        `https://cleander-project-server-vmm5.onrender.com/api/categories/${categoryId}`,
         {
           method: 'PUT',
           headers: {

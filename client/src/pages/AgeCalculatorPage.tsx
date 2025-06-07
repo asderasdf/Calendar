@@ -32,7 +32,7 @@ export default function AgeCalculatorPage() {
     setIsLoading(true);
     try {
     const response = await fetch(
-  `https://cleander-project-server.onrender.com/api/age-calculator?birthDate=${birthDate}`,
+  `https://cleander-project-server-vmm5.onrender.com/api/age-calculator?birthDate=${birthDate}`,
   { credentials: 'include' }
 );
 

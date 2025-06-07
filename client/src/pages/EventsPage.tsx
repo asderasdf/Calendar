@@ -89,7 +89,7 @@ export default function EventsPage() {
       const category =
         selectedCategory !== 'all' ? selectedCategory : undefined;
       const response = await fetch(
-        `https://cleander-project-server.onrender.com/api/events`,
+        `https://cleander-project-server-vmm5.onrender.com/api/events`,
         {
     credentials: 'include',
   }

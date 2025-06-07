@@ -50,7 +50,7 @@ export default function CategoriesPage() {
   // ✅ جلب الأقسام من السيرفر
   const fetchCategories = async () => {
     try {
-      const res = await fetch('https://cleander-project-server.onrender.com/api/categories', {
+      const res = await fetch('https://cleander-project-server-vmm5.onrender.com/api/categories', {
         credentials: 'include',
       });
 
@@ -71,7 +71,7 @@ export default function CategoriesPage() {
   // 🗑️ حذف القسم
   const deleteCategory = async (id: number) => {
     try {
-      const res = await fetch(`https://cleander-project-server.onrender.com/api/categories/${id}`, {
+      const res = await fetch(`https://cleander-project-server-vmm5.onrender.com/api/categories/${id}`, {
         method: 'DELETE',
         credentials: 'include',
       });

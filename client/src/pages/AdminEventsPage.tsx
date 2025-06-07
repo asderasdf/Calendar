@@ -59,7 +59,7 @@ export default function AdminEventsPage() {
  const { data: allEvents, isLoading: isEventsLoading, error } = useQuery<Event[]>({
   queryKey: ["admin-events"],
   queryFn: async () => {
-    const res = await fetch("https://cleander-project-server.onrender.com/api/admin/events", {
+    const res = await fetch("https://cleander-project-server-vmm5.onrender.com/api/admin/events", {
       method: "GET",
       credentials: "include", // إرسال الكوكي مع الطلب
     });

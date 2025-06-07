@@ -19,7 +19,7 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
-      '/api': 'https://cleander-project-server.onrender.com',
+      '/api': 'https://cleander-project-server-vmm5.onrender.com',
     },
   },
   build: {

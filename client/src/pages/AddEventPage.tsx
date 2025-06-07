@@ -151,7 +151,7 @@ export default function AddEventPage() {
     const fetchCategories = async () => {
       try {
         const res = await fetch(
-          'https://cleander-project-server.onrender.com/api/categories',
+          'https://cleander-project-server-vmm5.onrender.com/api/categories',
           {
             headers: {
               'Content-Type': 'application/json',
